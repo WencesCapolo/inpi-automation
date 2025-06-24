@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+openai
+requests
+PyPDF2
+xlrd
+openpyxl

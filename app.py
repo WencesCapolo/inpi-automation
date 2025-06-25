@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import json
-import io
 import os
 import sys
 import time
@@ -460,6 +459,33 @@ def send_emails(data):
     add_log(f"Emails sent successfully: {emails_sent}", "success")
     add_log(f"Emails failed: {emails_failed}", "success" if emails_failed == 0 else "error")
 
+def generate_comprehensive_json(data):
+    """Generate comprehensive JSON with all XLS data + emails"""
+    try:
+        # Create comprehensive export
+        export_data = {
+            "metadata": {
+                "source_file": data["metadata"]["source_file"],
+                "processing_date": datetime.now().isoformat(),
+                "total_records": len(data["data"]),
+                "records_with_emails": len([item for item in data["data"] if item.get("email_found")]),
+                "sheets_processed": data["metadata"]["sheets_processed"]
+            },
+            "records": data["data"]
+        }
+        
+        # Save to file
+        filename = f"comprehensive_data_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=2)
+        
+        add_log(f"✅ Comprehensive JSON exported: {filename}", "success")
+        return filename
+        
+    except Exception as e:
+        add_log(f"❌ Error generating comprehensive JSON: {str(e)}", "error")
+        return None
+
 # Header
 st.markdown('<h1 class="main-header">⚖️ INPI Automatización</h1>', unsafe_allow_html=True)
 st.markdown('<h3 style="text-align: center; color: #6c757d;">Estudio Eguía - Marcas y Patentes</h3>', unsafe_allow_html=True)
@@ -588,6 +614,18 @@ elif st.session_state.step == 2:
         if st.button("🚀 Iniciar Procesamiento de INPI", type="primary"):
             if process_inpi_data(data):
                 st.session_state.processed_data = data
+                
+                # Generate comprehensive JSON export
+                json_filename = generate_comprehensive_json(data)
+                if json_filename:
+                    with open(json_filename, 'r', encoding='utf-8') as f:
+                        st.download_button(
+                            label="📥 Descargar JSON Completo",
+                            data=f.read(),
+                            file_name=json_filename,
+                            mime="application/json"
+                        )
+                
                 st.session_state.step = 3
                 st.rerun()
         
@@ -615,8 +653,22 @@ elif st.session_state.step == 3:
         if len(items_with_emails) > 0:
             st.info(f"Listo para enviar emails a {len(items_with_emails)} destinatarios")
             
-            if st.button("📧 Enviar Todos los Emails", type="primary"):
-                send_emails(data)
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📧 Enviar Todos los Emails", type="primary"):
+                    send_emails(data)
+            
+            with col2:
+                # Generate and download comprehensive JSON
+                json_filename = generate_comprehensive_json(data)
+                if json_filename:
+                    with open(json_filename, 'r', encoding='utf-8') as f:
+                        st.download_button(
+                            label="📥 Descargar JSON Completo",
+                            data=f.read(),
+                            file_name=json_filename,
+                            mime="application/json"
+                        )
         else:
             st.warning("No se encontraron direcciones de email. El procesamiento de INPI puede ser necesario primero.")
         

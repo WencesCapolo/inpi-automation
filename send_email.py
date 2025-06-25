@@ -2,6 +2,8 @@ import openai
 import requests
 import json
 import os
+import time
+import random
 from typing import Optional
 
 # ------------------------------------------------------------------
@@ -56,99 +58,68 @@ BREVO_API_KEY = get_secret("BREVO_API_KEY")
 BREVO_URL = get_secret("BREVO_URL") or "https://api.brevo.com/v3/smtp/email"
 WHATSAPP_PHONE = get_secret("WHATSAPP_PHONE", "5493512017052")
 
-# Datos del cliente
-datos = {  
-    "Agente": "Part.",
-    "Acta": "4367076",
-    "Titulares": "PERRUPATO LEANDRO GASTÓN",
-    "Denominacion": "ANIMA2 EVENTOS Y ANIMACIONES",
-    "Clase": "41",
-    "Fecha": "29/5/2025",
-    "Oposiciones": "1",
-    "origen": "OPOSICIONES"
-}
+def generate_email_content(record: dict) -> str:
+    """Generate personalized email content for a single record using OpenAI."""
+    prompt = f"""
+    Actúa como un abogado especialista en propiedad intelectual en Argentina, que trabaja para el estudio jurídico Eguía, líder en registros de marcas. Escribe un email claro, profesional y persuasivo, destinado a un titular de una marca que recibió una oposición a su solicitud ante el INPI.
 
-# Construir el prompt dinámico
-prompt = f"""
-Actúa como un abogado especialista en propiedad intelectual en Argentina, que trabaja para el estudio jurídico Eguía, líder en registros de marcas. Escribe un email claro, profesional y persuasivo, destinado a un titular de una marca que recibió una oposición a su solicitud ante el INPI.
+    Objetivo: Ofrecer nuestros servicios como representantes legales para acompañarlo en el proceso de defensa y registro exitoso de su marca.
 
-Objetivo: Ofrecer nuestros servicios como representantes legales para acompañarlo en el proceso de defensa y registro exitoso de su marca.
+    Datos del caso:
+    - Nombre del titular: {record.get('Titulares', 'N/A')}
+    - Denominación de la marca: {record.get('Denominacion', 'N/A')}
+    - Clase: {record.get('Clase', 'N/A')}
+    - Número de acta: {record.get('Acta', 'N/A')}
+    - Fecha de publicación: {record.get('Fecha', 'N/A')}
+    - Cantidad de oposiciones: {record.get('Oposiciones', 'N/A')}
 
-Datos del caso:
-- Nombre del titular: {datos["Titulares"]}
-- Denominación de la marca: {datos["Denominacion"]}
-- Clase: {datos["Clase"]}
-- Número de acta: {datos["Acta"]}
-- Fecha de publicación: {datos["Fecha"]}
-- Cantidad de oposiciones: {datos["Oposiciones"]}
+    Instrucciones:
+    - Comienza con un saludo personalizado (usa el nombre completo del titular).
+    - Informa con precisión que su marca \"{record.get('Denominacion', 'N/A')}\", clase {record.get('Clase', 'N/A')}, ha recibido una oposición en el proceso de registro ante el INPI.
+    - Explica brevemente qué significa una oposición y qué implicancias tiene (puede afectar el registro de su marca).
+    - Presenta al Estudio Eguía como un equipo experto en defensa de marcas con amplia experiencia en resolver oposiciones.
+    - Ofrece una consulta gratuita para analizar el caso sin compromiso.
+    - Muestra empatía y transmite seguridad profesional.
+    - Firma como \"Estudio Eguía – Marcas y Patentes\".
+    - No escribas un asunto.
 
-Instrucciones:
-- Comienza con un saludo personalizado (usa el nombre completo del titular).
-- Informa con precisión que su marca "{datos["Denominacion"]}", clase {datos["Clase"]}, ha recibido una oposición en el proceso de registro ante el INPI.
-- Explica brevemente qué significa una oposición y qué implicancias tiene (puede afectar el registro de su marca).
-- Presenta al Estudio Eguía como un equipo experto en defensa de marcas con amplia experiencia en resolver oposiciones.
-- Ofrece una consulta gratuita para analizar el caso sin compromiso.
-- Muestra empatía y transmite seguridad profesional.
-- Firma como "Estudio Eguía – Marcas y Patentes".
-- No escribas un asunto.
+    Tono: Profesional, cercano, claro, sin tecnicismos innecesarios. Evita sonar como spam. La redacción debe invitar al titular a responder o agendar una llamada.
+    """
 
-Tono: Profesional, cercano, claro, sin tecnicismos innecesarios. Evita sonar como spam. La redacción debe invitar al titular a responder o agendar una llamada.
-"""
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "Eres un abogado experto en propiedad intelectual."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.7,
+        max_tokens=700
+    )
 
-# Llamada a la API de OpenAI
-response = openai.chat.completions.create(
-    model="gpt-4o",  # o "gpt-3.5-turbo" si tienes ese plan
-    messages=[
-        {"role": "system", "content": "Eres un abogado experto en propiedad intelectual."},
-        {"role": "user", "content": prompt}
-    ],
-    temperature=0.7,
-    max_tokens=700
-)
+    return str(response.choices[0].message.content).strip()
 
-# Mostrar el email generado
-email_content = response.choices[0].message.content
-print("Email content generated:")
-print(email_content)
-print("\n" + "="*50 + "\n")
 
-def send_email_via_brevo(email_content, recipient_email="wcapolo@mi.unc.edu.ar", subject=f"Oposición a su marca '{datos['Denominacion']}' - Estudio Eguía"):
-    """Send email using Brevo API"""
-    
-    # Create HTML email with logo and footer
+def send_email_via_brevo(email_content: str, record: dict) -> None:
+    """Send email using Brevo API for a given record."""
+    recipient_email = record.get('email_found')
+    if not recipient_email:
+        print(f"[SKIP] Acta {record.get('Acta')} – no email address found.")
+        return
+
+    subject = f"Oposición a su marca '{record.get('Denominacion', 'N/A')}' - Estudio Eguía"
+
     html_content = f"""
     <html>
     <head>
-        <meta charset="UTF-8">
+        <meta charset=\"UTF-8\">
         <style>
             body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
             .logo {{ text-align: center; margin-bottom: 30px; }}
             .content {{ margin: 20px 0; }}
-            .whatsapp-cta {{ 
-                text-align: center; 
-                margin: 30px 0; 
-            }}
-            .whatsapp-btn {{ 
-                display: inline-block;
-                background-color: #25D366;
-                color: white;
-                padding: 15px 30px;
-                text-decoration: none;
-                border-radius: 25px;
-                font-weight: bold;
-                font-size: 16px;
-                transition: background-color 0.3s;
-            }}
-            .whatsapp-btn:hover {{ 
-                background-color: #1da851;
-            }}
-            .footer {{ 
-                margin-top: 40px; 
-                padding-top: 20px; 
-                border-top: 2px solid #1f4e79;
-                font-size: 12px;
-                color: #666;
-            }}
+            .whatsapp-cta {{ text-align: center; margin: 30px 0; }}
+            .whatsapp-btn {{ display: inline-block; background-color: #25D366; color: white; padding: 15px 30px; text-decoration: none; border-radius: 25px; font-weight: bold; font-size: 16px; transition: background-color 0.3s; }}
+            .whatsapp-btn:hover {{ background-color: #1da851; }}
+            .footer {{ margin-top: 40px; padding-top: 20px; border-top: 2px solid #1f4e79; font-size: 12px; color: #666; }}
             .footer strong {{ color: #1f4e79; }}
         </style>
     </head>
@@ -158,37 +129,26 @@ def send_email_via_brevo(email_content, recipient_email="wcapolo@mi.unc.edu.ar",
                  alt="Estudio Eguía Logo" 
                  style="max-width: 250px; height: auto;">
         </div>
-        
-        <div class="content">
+        <div class=\"content\">
             {email_content.replace(chr(10), '<br>') if email_content else ''}
-            
-            <div class="whatsapp-cta">
-                <a href="https://api.whatsapp.com/send?phone={WHATSAPP_PHONE}" 
-                   class="whatsapp-btn" 
-                   target="_blank">
-                    📱 Contactar por WhatsApp
-                </a>
+            <div class=\"whatsapp-cta\">
+                <a href=\"https://api.whatsapp.com/send?phone={WHATSAPP_PHONE}\" class=\"whatsapp-btn\" target=\"_blank\">📱 Contactar por WhatsApp</a>
             </div>
         </div>
-        
-        <div class="footer">
+        <div class=\"footer\">
             <strong>Nicolas Eguía Cima</strong><br>
             Dirección<br><br>
-            
             <strong>Móvil:</strong> +54 9 351 5114133<br>
             <strong>Teléfono:</strong> +54 0351 4812200<br><br>
-            
             Tristán Malbrán 4011 - Piso 2 Of. 1<br>
             Cerro de las Rosas - CP: 5009ACE - Córdoba - Argentina<br><br>
-            
             <strong>Redes:</strong> @eguiamarcasypatentes<br><br>
-            
             <em>CÓRDOBA - ROSARIO - MENDOZA - BUENOS AIRES - LA RIOJA - TUCUMÁN</em>
         </div>
     </body>
     </html>
     """
-    
+
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
@@ -203,7 +163,7 @@ def send_email_via_brevo(email_content, recipient_email="wcapolo@mi.unc.edu.ar",
         "to": [
             {
                 "email": recipient_email,
-                "name": datos["Titulares"]
+                "name": record.get('Titulares', 'Cliente')
             }
         ],
         "subject": subject,
@@ -212,19 +172,40 @@ def send_email_via_brevo(email_content, recipient_email="wcapolo@mi.unc.edu.ar",
     
     try:
         response = requests.post(BREVO_URL, headers=headers, data=json.dumps(payload))
-        
         if response.status_code == 201:
-            print("Email sent successfully!")
-            print(f"Response: {response.json()}")
+            print(f"[SUCCESS] Email sent to {recipient_email} (Acta {record.get('Acta')})")
         else:
-            print(f"Failed to send email. Status code: {response.status_code}")
-            print(f"Error: {response.text}")
-            
+            print(f"[ERROR] Failed to send email to {recipient_email}. Status: {response.status_code}. Response: {response.text}")
     except Exception as e:
-        print(f"Error sending email: {e}")
+        print(f"[EXCEPTION] Error sending email to {recipient_email}: {e}")
 
-# Send the email
-send_email_via_brevo(
-    email_content=email_content,
-    recipient_email="wcapolo@mi.unc.edu.ar"
-)
+
+if __name__ == "__main__":
+    # Load JSON data
+    try:
+        with open("data25.json", "r", encoding="utf-8") as f:
+            dataset = json.load(f)
+    except FileNotFoundError:
+        print("data25.json not found. Ensure the file exists in the script directory.")
+        exit(1)
+
+    records = dataset.get("records", [])
+    print(f"Total records: {len(records)}")
+
+    for idx, record in enumerate(records, 1):
+        email = record.get("email_found")
+        if not email:
+            print(f"[{idx}/{len(records)}] Skipping Acta {record.get('Acta')} – no email.")
+            continue
+
+        print(f"[{idx}/{len(records)}] Processing Acta {record.get('Acta')} – sending to {email}...")
+        try:
+            content = generate_email_content(record)
+            send_email_via_brevo(content, record)
+            # Respectful delay to avoid hitting rate limits
+            time.sleep(random.uniform(1.0, 2.0))
+        except Exception as e:
+            print(f"[EXCEPTION] Error processing Acta {record.get('Acta')}: {e}")
+            continue
+
+    print("\n=== Email sending routine completed ===")

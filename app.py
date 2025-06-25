@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import traceback
+import logging
 from datetime import datetime
 import requests
 import random
@@ -75,14 +76,92 @@ if 'processed_data' not in st.session_state:
 if 'logs' not in st.session_state:
     st.session_state.logs = []
 
-def add_log(message, log_type="info"):
-    """Add a log message with timestamp"""
+# Setup logging system
+def setup_logger():
+    """Setup minimal logging system with console output"""
+    logger = logging.getLogger('inpi_automation')
+    
+    if not logger.handlers:  # Avoid duplicate handlers
+        logger.setLevel(logging.DEBUG)
+        
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        
+        # Simple formatter for traceability
+        formatter = logging.Formatter(
+            '%(asctime)s | %(levelname)s | %(funcName)s:%(lineno)d | %(message)s',
+            datefmt='%H:%M:%S'
+        )
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+    
+    return logger
+
+# Initialize logger
+logger = setup_logger()
+
+def add_log(message, log_type="info", include_traceback=False):
+    """Enhanced logging with both console and Streamlit UI output"""
     timestamp = datetime.now().strftime("%H:%M:%S")
+    
+    # Get caller information for better traceability
+    frame = sys._getframe(1)
+    caller_name = frame.f_code.co_name
+    caller_line = frame.f_lineno
+    
+    # Create enhanced message with context
+    if caller_name != '<module>':
+        enhanced_message = f"{caller_name}:{caller_line} | {message}"
+    else:
+        enhanced_message = message
+    
+    # Add to Streamlit session state (preserve existing functionality)
     st.session_state.logs.append({
         "timestamp": timestamp,
-        "message": message,
-        "type": log_type
+        "message": message,  # Keep original message for UI
+        "type": log_type,
+        "function": caller_name,
+        "line": caller_line
     })
+    
+    # Log to console with appropriate level
+    if log_type == "error":
+        logger.error(enhanced_message)
+        if include_traceback:
+            logger.error("Traceback: %s", traceback.format_exc())
+    elif log_type == "warning":
+        logger.warning(enhanced_message)
+    elif log_type == "success":
+        logger.info(f"✅ {enhanced_message}")
+    else:  # info and others
+        logger.info(enhanced_message)
+
+def log_api_error(operation, url, status_code=None, error_msg=None, response_text=None):
+    """Specialized logging for API failures"""
+    base_msg = f"API {operation} failed - {url}"
+    
+    if status_code:
+        base_msg += f" (Status: {status_code})"
+    
+    if error_msg:
+        base_msg += f" - {error_msg}"
+    
+    add_log(base_msg, "error")
+    
+    if response_text:
+        add_log(f"Response details: {response_text[:200]}...", "error")
+
+def log_file_error(operation, filename, error):
+    """Specialized logging for file processing errors"""
+    add_log(f"File {operation} failed - {filename}: {str(error)}", "error", include_traceback=True)
+
+def log_auth_error(service, status_code, details=None):
+    """Specialized logging for authentication/authorization errors"""
+    msg = f"Authentication error - {service} (Status: {status_code})"
+    if details:
+        msg += f" - {details}"
+    add_log(msg, "error")
 
 def display_logs():
     """Display logs in a container"""
@@ -136,9 +215,7 @@ def process_sheet(df, sheet_name):
         return rows_data
     
     except Exception as e:
-        error_msg = f"Error processing sheet {sheet_name}: {str(e)}"
-        add_log(error_msg, "error")
-        add_log(f"Full traceback: {traceback.format_exc()}", "error")
+        log_file_error("Excel sheet processing", sheet_name, e)
         return []
 
 def process_inpi_data(data):
@@ -148,13 +225,13 @@ def process_inpi_data(data):
     # Get session with cookies for API requests
     api_session = get_session_with_cookies()
     if not api_session:
-        add_log("Failed to get session with cookies for API", "error")
+        log_auth_error("INPI API", "session_failed", "Could not establish session with cookies")
         return False
     
     # Get session with cookies for PDF downloads  
     pdf_session = get_session_with_cookies()
     if not pdf_session:
-        add_log("Failed to get session with cookies for PDF downloads", "error")
+        log_auth_error("INPI PDF", "session_failed", "Could not establish session with cookies")
         return False
     
     # Create progress components
@@ -220,7 +297,7 @@ def process_inpi_data(data):
                             else:
                                 add_log(f"  -> No email found: {email_error}")
                         else:
-                            add_log(f"  -> PDF download failed: {pdf_error}", "error")
+                            log_file_error("PDF download", document_url, pdf_error)
                         
                         # Add delay
                         if i < total_items:
@@ -229,17 +306,17 @@ def process_inpi_data(data):
                     else:
                         add_log(f"  -> WARNING: {error_msg}")
                         
-                except json.JSONDecodeError:
-                    add_log(f"  -> ERROR: Invalid JSON response", "error")
+                except json.JSONDecodeError as e:
+                    log_api_error("INPI", api_url, response.status_code, "Invalid JSON response", str(e))
                 except Exception as e:
-                    add_log(f"  -> ERROR: {str(e)}", "error")
+                    log_api_error("INPI", api_url, response.status_code, str(e))
                     
             else:
-                add_log(f"Item {i}: Acta {acta} - FAILED (Status: {response.status_code})", "error")
+                log_api_error("INPI", api_url, response.status_code, f"HTTP request failed for Acta {acta}")
                 error_count += 1
                 
         except Exception as e:
-            add_log(f"Item {i}: Acta {acta} - ERROR: {str(e)}", "error")
+            log_api_error("INPI", api_url, None, f"Request exception for Acta {acta}: {str(e)}")
             error_count += 1
         
         # Add delay between requests
@@ -314,6 +391,7 @@ def send_emails(data):
             - Ofrece una consulta gratuita para analizar el caso sin compromiso.
             - Muestra empatía y transmite seguridad profesional.
             - Firma como "Estudio Eguía – Marcas y Patentes".
+            - No escribas un asunto.
 
             Tono: Profesional, cercano, claro, sin tecnicismos innecesarios. Evita sonar como spam. La redacción debe invitar al titular a responder o agendar una llamada.
             """
@@ -321,18 +399,25 @@ def send_emails(data):
             # Generate email content
             add_log(f"Generating email content for {item.get('Titulares', 'N/A')}")
             
-            response = openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "Eres un abogado experto en propiedad intelectual."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=700
-            )
-            
-            email_content = response.choices[0].message.content
-            add_log(f"Email content generated successfully")
+            try:
+                response = openai.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "Eres un abogado experto en propiedad intelectual."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=700
+                )
+                
+                email_content = response.choices[0].message.content
+                add_log(f"Email content generated successfully")
+                
+            except Exception as openai_error:
+                log_api_error("OpenAI", "https://api.openai.com/v1/chat/completions", None, 
+                            f"Email generation failed for {item.get('Titulares', 'N/A')}", str(openai_error))
+                emails_failed += 1
+                continue
             
             # Send email via Brevo
             headers = {
@@ -436,13 +521,22 @@ def send_emails(data):
                 add_log(f"✅ Email sent successfully to {item.get('email_found')}", "success")
                 emails_sent += 1
             else:
-                add_log(f"❌ Failed to send email to {item.get('email_found')} - Status: {email_response.status_code}", "error")
-                add_log(f"Error details: {email_response.text}", "error")
+                # Check for IP authorization errors specifically
+                if email_response.status_code in [401, 403]:
+                    error_text = email_response.text.lower()
+                    if 'ip' in error_text and ('not authorized' in error_text or 'forbidden' in error_text or 'unauthorized' in error_text):
+                        log_auth_error("Brevo", email_response.status_code, "IP address not authorized - add your IP to Brevo authorized list")
+                    else:
+                        log_auth_error("Brevo", email_response.status_code, "Authentication/Authorization failed")
+                else:
+                    log_api_error("Brevo Email", BREVO_URL, email_response.status_code, 
+                                f"Failed to send email to {item.get('email_found')}", 
+                                email_response.text)
+                
                 emails_failed += 1
                 
         except Exception as e:
-            add_log(f"❌ Error sending email for {item.get('Titulares', 'N/A')}: {str(e)}", "error")
-            add_log(f"Full traceback: {traceback.format_exc()}", "error")
+            add_log(f"❌ Error sending email for {item.get('Titulares', 'N/A')}: {str(e)}", "error", include_traceback=True)
             emails_failed += 1
         
         # Add delay between emails
@@ -483,7 +577,7 @@ def generate_comprehensive_json(data):
         return filename
         
     except Exception as e:
-        add_log(f"❌ Error generating comprehensive JSON: {str(e)}", "error")
+        log_file_error("JSON export generation", "comprehensive_data_export", e)
         return None
 
 # Header
@@ -589,8 +683,7 @@ if st.session_state.step == 1:
                 os.remove(temp_file_path)
                 
             except Exception as e:
-                add_log(f"❌ Error processing file: {str(e)}", "error")
-                add_log(f"Full traceback: {traceback.format_exc()}", "error")
+                log_file_error("Excel file processing", uploaded_file.name, e)
                 if os.path.exists(temp_file_path):
                     os.remove(temp_file_path)
 
@@ -678,14 +771,3 @@ elif st.session_state.step == 3:
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
-
-# Always show logs at the bottom
-st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-st.header("📋 Registros de Procesamiento")
-display_logs()
-
-# Clear logs button
-if st.session_state.logs:
-    if st.button("🗑️ Clear Logs"):
-        st.session_state.logs = []
-        st.rerun()

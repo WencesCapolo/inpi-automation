@@ -24,7 +24,7 @@ except ImportError as e:
 
 # Page configuration    
 st.set_page_config(
-    page_title="INPI Automatización - Estudio Eguía",
+    page_title="Estudio Eguía",
     page_icon="⚖️",
     layout="wide"
 )
@@ -341,6 +341,19 @@ def send_emails(data):
     """Send emails for processed data"""
     add_log("Starting email sending process...")
     
+    # Generate campana_tag from source filename
+    source_filename = data["metadata"]["source_file"]
+    campana_tag = None
+    
+    # Extract first number from filename using regex
+    match = re.match(r'^(\d+)', source_filename)
+    if match:
+        numero_boletin = match.group(1)
+        campana_tag = f"part-{numero_boletin}"
+        add_log(f"Generated campaign tag: {campana_tag}")
+    else:
+        add_log(f"Warning: Filename '{source_filename}' does not start with a number - no campaign tag generated", "warning")
+    
     # OpenAI and Brevo configuration using Streamlit secrets
     openai.api_key = st.secrets["OPENAI_API_KEY"]
     BREVO_API_KEY = st.secrets["BREVO_API_KEY"]
@@ -515,6 +528,10 @@ def send_emails(data):
                 "htmlContent": html_content
             }
             
+            # Add campaign tag if available
+            if campana_tag:
+                payload["tags"] = [campana_tag]
+            
             email_response = requests.post(BREVO_URL, headers=headers, data=json.dumps(payload))
             
             if email_response.status_code == 201:
@@ -574,18 +591,66 @@ def generate_comprehensive_json(data):
             json.dump(export_data, f, ensure_ascii=False, indent=2)
         
         add_log(f"✅ Comprehensive JSON exported: {filename}", "success")
-        return filename
+        return filename, export_data
         
     except Exception as e:
         log_file_error("JSON export generation", "comprehensive_data_export", e)
-        return None
+        return None, None
+
+def send_webhook(data):
+    """Send webhook notification with comprehensive JSON data"""
+    try:
+        # Get webhook URL from secrets
+        webhook_url = st.secrets.get("WEBHOOK_URL")
+        if not webhook_url:
+            add_log("❌ Webhook URL not configured in secrets", "error")
+            return False
+        
+        add_log("Sending webhook notification...")
+        
+        # Generate the comprehensive data
+        _, export_data = generate_comprehensive_json(data)
+        if not export_data:
+            add_log("❌ Failed to generate webhook payload", "error")
+            return False
+        
+        # Send HTTP POST request with JSON payload
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Estudio-Eguia-INPI-Automation/1.0"
+        }
+        
+        response = requests.post(
+            webhook_url,
+            headers=headers,
+            data=json.dumps(export_data, ensure_ascii=False),
+            timeout=30
+        )
+        
+        if response.status_code in [200, 201, 202, 204]:
+            add_log(f"✅ Webhook sent successfully (Status: {response.status_code})", "success")
+            return True
+        else:
+            log_api_error("Webhook", webhook_url, response.status_code, 
+                         "Webhook request failed", response.text[:200])
+            return False
+            
+    except requests.exceptions.Timeout:
+        add_log("❌ Webhook request timed out after 30 seconds", "error")
+        return False
+    except requests.exceptions.ConnectionError:
+        add_log("❌ Webhook connection failed - check URL and network", "error")
+        return False
+    except Exception as e:
+        add_log(f"❌ Webhook error: {str(e)}", "error", include_traceback=True)
+        return False
 
 # Header
 st.markdown('<h1 class="main-header">⚖️ INPI Automatización</h1>', unsafe_allow_html=True)
 st.markdown('<h3 style="text-align: center; color: #6c757d;">Estudio Eguía - Marcas y Patentes</h3>', unsafe_allow_html=True)
 
 # Progress indicator
-progress_steps = ["📁 Cargar", "🔍 Procesar", "📧 Enviar"]
+progress_steps = ["📁 Cargar", "🔍 Buscar", "📧 Enviar"]
 cols = st.columns(3)
 for idx, (col, step_name) in enumerate(zip(cols, progress_steps)):
     with col:
@@ -600,12 +665,13 @@ st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
 # Step 1: Upload File
 if st.session_state.step == 1:
-    st.header("📁 Paso 1: Cargar Archivo XLS")
+    st.header("📁 Paso 1: Cargar Excel")
     
     uploaded_file = st.file_uploader(
-        "Elija un archivo XLS que contenga las hojas OPOSICIONES y VISTAS",
+        "El archivo Excel que contenga las hojas OPOSICIONES y VISTAS",
         type=['xls'],
-        help="Cargue el archivo Excel desde INPI"
+        help="Cargue el archivo Excel desde INPI",
+        key="excel_uploader_step1"
     )
     
     if uploaded_file is not None:
@@ -689,7 +755,7 @@ if st.session_state.step == 1:
 
 # Step 2: Process INPI Data
 elif st.session_state.step == 2:
-    st.header("🔍 Paso 2: Procesar Datos de INPI")
+    st.header("🔍 Paso 2: Buscar emails en INPI")
     
     if st.session_state.uploaded_data:
         data = st.session_state.uploaded_data
@@ -702,14 +768,14 @@ elif st.session_state.step == 2:
         with col3:
             st.metric("Hojas Procesadas", len(data["metadata"]["sheets_processed"]))
         
-        st.info("Este proceso buscará datos adicionales en el portal de INPI para cada registro. Esto puede tomar varios minutos.")
+        st.info("Este proceso buscará el email de cada registro en el portal de INPI. Esto puede tomar varios minutos.")
         
-        if st.button("🚀 Iniciar Procesamiento de INPI", type="primary"):
+        if st.button("🚀 Iniciar búsqueda en INPI", type="primary"):
             if process_inpi_data(data):
                 st.session_state.processed_data = data
                 
                 # Generate comprehensive JSON export
-                json_filename = generate_comprehensive_json(data)
+                json_filename, _ = generate_comprehensive_json(data)
                 if json_filename:
                     with open(json_filename, 'r', encoding='utf-8') as f:
                         st.download_button(
@@ -722,12 +788,6 @@ elif st.session_state.step == 2:
                 st.session_state.step = 3
                 st.rerun()
         
-        # Button to skip to email step (for testing)
-        if st.button("⏭️ Saltar Procesamiento de INPI"):
-            st.session_state.processed_data = st.session_state.uploaded_data
-            st.session_state.step = 3
-            st.rerun()
-
 # Step 3: Send Emails
 elif st.session_state.step == 3:
     st.header("📧 Paso 3: Enviar Emails")
@@ -750,10 +810,9 @@ elif st.session_state.step == 3:
             with col1:
                 if st.button("📧 Enviar Todos los Emails", type="primary"):
                     send_emails(data)
-            
-            with col2:
+                
                 # Generate and download comprehensive JSON
-                json_filename = generate_comprehensive_json(data)
+                json_filename, _ = generate_comprehensive_json(data)
                 if json_filename:
                     with open(json_filename, 'r', encoding='utf-8') as f:
                         st.download_button(
@@ -762,6 +821,10 @@ elif st.session_state.step == 3:
                             file_name=json_filename,
                             mime="application/json"
                         )
+                    
+                    # Webhook button
+                    if st.button("🔗 Enviar Webhook", help="Enviar datos via webhook"):
+                        send_webhook(data)
         else:
             st.warning("No se encontraron direcciones de email. El procesamiento de INPI puede ser necesario primero.")
         

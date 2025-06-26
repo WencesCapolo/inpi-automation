@@ -103,7 +103,21 @@ def extract_email_from_pdf(pdf_content):
         email_match = re.search(email_pattern, full_text)
         
         if email_match:
-            return email_match.group(), None
+            email = email_match.group()
+            
+            # Validate email - reject if it starts with "info" or contains "estudio" before "@"
+            email_local_part = email.split('@')[0].lower()  # Get part before @ and make lowercase
+            
+            if email_local_part.startswith('info'):
+                print(f"  -> Email validation failed: '{email}' starts with 'info' - rejected")
+                return None, "Email rejected: starts with 'info'"
+            
+            if 'estudio' in email_local_part:
+                print(f"  -> Email validation failed: '{email}' contains 'estudio' - rejected")
+                return None, "Email rejected: contains 'estudio'"
+            
+            # Email passed validation
+            return email, None
         else:
             return None, "No email found in PDF"
             

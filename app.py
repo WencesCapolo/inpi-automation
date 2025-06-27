@@ -343,6 +343,9 @@ def send_emails(data):
     
     add_log("Starting automatic batch email processing...")
     
+    # Send webhook with original data before starting email process
+    send_webhook(data)
+    
     # Configuration
     BATCH_SIZE = 20
     BATCH_DELAY = 1.0  # 1 second between batches
@@ -902,10 +905,6 @@ elif st.session_state.step == 3:
                             file_name=json_filename,
                             mime="application/json"
                         )
-                    
-                    # Webhook button
-                    if st.button("🔗 Enviar Webhook", help="Enviar datos via webhook"):
-                        send_webhook(data)
         else:
             st.warning("No se encontraron direcciones de email. El procesamiento de INPI puede ser necesario primero.")
         

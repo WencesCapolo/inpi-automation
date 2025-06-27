@@ -349,29 +349,6 @@ def send_emails(data):
     # Configuration
     BATCH_SIZE = 20
     BATCH_DELAY = 1.0  # 1 second between batches
-    MAX_RUNTIME = 12 * 60  # 12 minutes max (safety buffer)
-    
-    # Initialize state for automatic batching
-    if 'auto_batch_state' not in st.session_state:
-        st.session_state.auto_batch_state = {
-            'current_index': 0,
-            'emails_sent': 0,
-            'emails_failed': 0,
-            'batch_number': 1,
-            'start_time': time.time(),
-            'is_processing': True,
-            'campana_tag': None
-        }
-        
-        # Generate campana_tag from source filename (do this once)
-        source_filename = data["metadata"]["source_file"]
-        match = re.match(r'^(\d+)', source_filename)
-        if match:
-            numero_boletin = match.group(1)
-            st.session_state.auto_batch_state['campana_tag'] = f"part-{numero_boletin}"
-            add_log(f"Generated campaign tag: {st.session_state.auto_batch_state['campana_tag']}")
-        else:
-            add_log(f"Warning: Filename '{source_filename}' does not start with a number - no campaign tag generated", "warning")
     
     # Get items to process
     items_with_emails = [item for item in data['data'] if item.get('email_found')]
@@ -381,81 +358,67 @@ def send_emails(data):
         add_log("No emails found to send to", "error")
         return
     
-    # Get current state
-    state = st.session_state.auto_batch_state
-    current_idx = state['current_index']
+    add_log(f"Found {total_emails} records with emails")
     
-    # Check if we're done
-    if current_idx >= total_emails:
-        # Final progress update
-        progress_bar = st.progress(1.0)
-        status_text = st.empty()
-        status_text.text("Email sending completed!")
-        
-        # Print summary
-        add_log(f"=== EMAIL SENDING SUMMARY ===", "success")
-        add_log(f"Total emails attempted: {total_emails}", "success")
-        add_log(f"Emails sent successfully: {state['emails_sent']}", "success")
-        add_log(f"Emails failed: {state['emails_failed']}", "success" if state['emails_failed'] == 0 else "error")
-        
-        # Reset state
-        del st.session_state.auto_batch_state
-        return
+    # Generate campana_tag from source filename
+    source_filename = data["metadata"]["source_file"]
+    campana_tag = None
+    match = re.match(r'^(\d+)', source_filename)
+    if match:
+        numero_boletin = match.group(1)
+        campana_tag = f"part-{numero_boletin}"
+        add_log(f"Generated campaign tag: {campana_tag}")
+    else:
+        add_log(f"Warning: Filename '{source_filename}' does not start with a number - no campaign tag generated", "warning")
     
-    # Check time limits
-    elapsed_time = time.time() - state['start_time']
-    if elapsed_time > MAX_RUNTIME:
-        add_log("⏰ Maximum runtime reached, stopping for safety", "warning")
-        # Print summary
-        add_log(f"=== EMAIL SENDING SUMMARY (PARTIAL) ===", "success")
-        add_log(f"Total emails attempted: {current_idx}", "success")
-        add_log(f"Emails sent successfully: {state['emails_sent']}", "success")
-        add_log(f"Emails failed: {state['emails_failed']}", "success" if state['emails_failed'] == 0 else "error")
-        return
-    
-    # Create progress components (same as original)
-    progress_bar = st.progress(current_idx / total_emails)
+    # Create progress components
+    progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Calculate current batch
-    end_idx = min(current_idx + BATCH_SIZE, total_emails)
-    batch_items = items_with_emails[current_idx:end_idx]
+    # Initialize counters
+    emails_sent = 0
+    emails_failed = 0
+    batch_number = 1
     
-    add_log(f"Processing batch {state['batch_number']}: emails {current_idx + 1}-{end_idx} of {total_emails}")
-    
-    # Process current batch
-    batch_sent, batch_failed = process_email_batch(
-        batch_items, current_idx, total_emails, progress_bar, status_text, state['campana_tag']
-    )
-    
-    # Update state
-    state['current_index'] = end_idx
-    state['emails_sent'] += batch_sent
-    state['emails_failed'] += batch_failed
-    state['batch_number'] += 1
-    
-    # Memory cleanup
-    gc.collect()
-    add_log(f"✅ Batch {state['batch_number']-1} completed: {batch_sent} sent, {batch_failed} failed")
-    
-    # Auto-continue if more batches remain
-    if end_idx < total_emails:
-        add_log(f"⏳ Next batch starts in {BATCH_DELAY} seconds...")
-        time.sleep(BATCH_DELAY)
-        st.rerun()  # Automatically move to next batch
-    else:
-        # Final completion (this handles the case where we just finished the last batch)
-        progress_bar.progress(1.0)
-        status_text.text("Email sending completed!")
+    # Process all batches in continuous loop
+    current_idx = 0
+    while current_idx < total_emails:
         
-        # Print summary
-        add_log(f"=== EMAIL SENDING SUMMARY ===", "success")
-        add_log(f"Total emails attempted: {total_emails}", "success")
-        add_log(f"Emails sent successfully: {state['emails_sent']}", "success")
-        add_log(f"Emails failed: {state['emails_failed']}", "success" if state['emails_failed'] == 0 else "error")
+        # Calculate current batch
+        end_idx = min(current_idx + BATCH_SIZE, total_emails)
+        batch_items = items_with_emails[current_idx:end_idx]
         
-        # Reset state
-        del st.session_state.auto_batch_state
+        add_log(f"Processing batch {batch_number}: emails {current_idx + 1}-{end_idx} of {total_emails}")
+        
+        # Process current batch
+        batch_sent, batch_failed = process_email_batch(
+            batch_items, current_idx, total_emails, progress_bar, status_text, campana_tag
+        )
+        
+        # Update counters
+        emails_sent += batch_sent
+        emails_failed += batch_failed
+        current_idx = end_idx
+        batch_number += 1
+        
+        # Memory cleanup after each batch
+        gc.collect()
+        add_log(f"✅ Batch {batch_number-1} completed: {batch_sent} sent, {batch_failed} failed")
+        
+        # Add delay between batches (except for last batch)
+        if current_idx < total_emails:
+            add_log(f"⏳ Next batch starts in {BATCH_DELAY} seconds...")
+            time.sleep(BATCH_DELAY)
+    
+    # Final progress update
+    progress_bar.progress(1.0)
+    status_text.text("Email sending completed!")
+    
+    # Print summary
+    add_log(f"=== EMAIL SENDING SUMMARY ===", "success")
+    add_log(f"Total emails attempted: {min(current_idx, total_emails)}", "success")
+    add_log(f"Emails sent successfully: {emails_sent}", "success")
+    add_log(f"Emails failed: {emails_failed}", "success" if emails_failed == 0 else "error")
 
 
 def process_email_batch(batch_items, start_idx, total_emails, progress_bar, status_text, campana_tag):
@@ -598,6 +561,8 @@ def process_email_batch(batch_items, start_idx, total_emails, progress_bar, stat
                     Cerro de las Rosas - CP: 5009ACE - Córdoba - Argentina<br><br>
                     
                     <strong>Redes:</strong> @eguiamarcasypatentes<br><br>
+                    
+                    <strong>Nosotros:</strong> eguia.com.ar<br><br>
                     
                     <em>CÓRDOBA - ROSARIO - MENDOZA - BUENOS AIRES - LA RIOJA - TUCUMÁN</em>
                 </div>

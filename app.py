@@ -338,51 +338,142 @@ def process_inpi_data(data):
     return True
 
 def send_emails(data):
-    """Send emails for processed data"""
-    add_log("Starting email sending process...")
+    """Send emails for processed data with automatic batch processing"""
+    import gc
     
-    # Generate campana_tag from source filename
-    source_filename = data["metadata"]["source_file"]
-    campana_tag = None
+    add_log("Starting automatic batch email processing...")
     
-    # Extract first number from filename using regex
-    match = re.match(r'^(\d+)', source_filename)
-    if match:
-        numero_boletin = match.group(1)
-        campana_tag = f"part-{numero_boletin}"
-        add_log(f"Generated campaign tag: {campana_tag}")
+    # Configuration
+    BATCH_SIZE = 20
+    BATCH_DELAY = 1.0  # 1 second between batches
+    MAX_RUNTIME = 12 * 60  # 12 minutes max (safety buffer)
+    
+    # Initialize state for automatic batching
+    if 'auto_batch_state' not in st.session_state:
+        st.session_state.auto_batch_state = {
+            'current_index': 0,
+            'emails_sent': 0,
+            'emails_failed': 0,
+            'batch_number': 1,
+            'start_time': time.time(),
+            'is_processing': True,
+            'campana_tag': None
+        }
+        
+        # Generate campana_tag from source filename (do this once)
+        source_filename = data["metadata"]["source_file"]
+        match = re.match(r'^(\d+)', source_filename)
+        if match:
+            numero_boletin = match.group(1)
+            st.session_state.auto_batch_state['campana_tag'] = f"part-{numero_boletin}"
+            add_log(f"Generated campaign tag: {st.session_state.auto_batch_state['campana_tag']}")
+        else:
+            add_log(f"Warning: Filename '{source_filename}' does not start with a number - no campaign tag generated", "warning")
+    
+    # Get items to process
+    items_with_emails = [item for item in data['data'] if item.get('email_found')]
+    total_emails = len(items_with_emails)
+    
+    if not items_with_emails:
+        add_log("No emails found to send to", "error")
+        return
+    
+    # Get current state
+    state = st.session_state.auto_batch_state
+    current_idx = state['current_index']
+    
+    # Check if we're done
+    if current_idx >= total_emails:
+        # Final progress update
+        progress_bar = st.progress(1.0)
+        status_text = st.empty()
+        status_text.text("Email sending completed!")
+        
+        # Print summary
+        add_log(f"=== EMAIL SENDING SUMMARY ===", "success")
+        add_log(f"Total emails attempted: {total_emails}", "success")
+        add_log(f"Emails sent successfully: {state['emails_sent']}", "success")
+        add_log(f"Emails failed: {state['emails_failed']}", "success" if state['emails_failed'] == 0 else "error")
+        
+        # Reset state
+        del st.session_state.auto_batch_state
+        return
+    
+    # Check time limits
+    elapsed_time = time.time() - state['start_time']
+    if elapsed_time > MAX_RUNTIME:
+        add_log("⏰ Maximum runtime reached, stopping for safety", "warning")
+        # Print summary
+        add_log(f"=== EMAIL SENDING SUMMARY (PARTIAL) ===", "success")
+        add_log(f"Total emails attempted: {current_idx}", "success")
+        add_log(f"Emails sent successfully: {state['emails_sent']}", "success")
+        add_log(f"Emails failed: {state['emails_failed']}", "success" if state['emails_failed'] == 0 else "error")
+        return
+    
+    # Create progress components (same as original)
+    progress_bar = st.progress(current_idx / total_emails)
+    status_text = st.empty()
+    
+    # Calculate current batch
+    end_idx = min(current_idx + BATCH_SIZE, total_emails)
+    batch_items = items_with_emails[current_idx:end_idx]
+    
+    add_log(f"Processing batch {state['batch_number']}: emails {current_idx + 1}-{end_idx} of {total_emails}")
+    
+    # Process current batch
+    batch_sent, batch_failed = process_email_batch(
+        batch_items, current_idx, total_emails, progress_bar, status_text, state['campana_tag']
+    )
+    
+    # Update state
+    state['current_index'] = end_idx
+    state['emails_sent'] += batch_sent
+    state['emails_failed'] += batch_failed
+    state['batch_number'] += 1
+    
+    # Memory cleanup
+    gc.collect()
+    add_log(f"✅ Batch {state['batch_number']-1} completed: {batch_sent} sent, {batch_failed} failed")
+    
+    # Auto-continue if more batches remain
+    if end_idx < total_emails:
+        add_log(f"⏳ Next batch starts in {BATCH_DELAY} seconds...")
+        time.sleep(BATCH_DELAY)
+        st.rerun()  # Automatically move to next batch
     else:
-        add_log(f"Warning: Filename '{source_filename}' does not start with a number - no campaign tag generated", "warning")
-    
+        # Final completion (this handles the case where we just finished the last batch)
+        progress_bar.progress(1.0)
+        status_text.text("Email sending completed!")
+        
+        # Print summary
+        add_log(f"=== EMAIL SENDING SUMMARY ===", "success")
+        add_log(f"Total emails attempted: {total_emails}", "success")
+        add_log(f"Emails sent successfully: {state['emails_sent']}", "success")
+        add_log(f"Emails failed: {state['emails_failed']}", "success" if state['emails_failed'] == 0 else "error")
+        
+        # Reset state
+        del st.session_state.auto_batch_state
+
+
+def process_email_batch(batch_items, start_idx, total_emails, progress_bar, status_text, campana_tag):
+    """Process a single batch of emails"""
     # OpenAI and Brevo configuration using Streamlit secrets
     openai.api_key = st.secrets["OPENAI_API_KEY"]
     BREVO_API_KEY = st.secrets["BREVO_API_KEY"]
     BREVO_URL = st.secrets["BREVO_URL"]
     WHATSAPP_PHONE = st.secrets["WHATSAPP_PHONE"]
     
-    # Filter items that have emails
-    items_with_emails = [item for item in data['data'] if item.get('email_found')]
+    success_count = 0
+    failed_count = 0
     
-    if not items_with_emails:
-        add_log("No emails found to send to", "error")
-        return
-    
-    add_log(f"Found {len(items_with_emails)} records with emails")
-    
-    # Create progress components
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    emails_sent = 0
-    emails_failed = 0
-    
-    for i, item in enumerate(items_with_emails, 1):
-        progress = i / len(items_with_emails)
+    for i, item in enumerate(batch_items, 1):
+        current_email_idx = start_idx + i
+        progress = current_email_idx / total_emails
         progress_bar.progress(progress)
-        status_text.text(f"Sending email {i}/{len(items_with_emails)}")
+        status_text.text(f"Sending email {current_email_idx}/{total_emails}")
         
         try:
-            # Build prompt for email generation
+            # Build prompt for email generation (same as original)
             prompt = f"""
             Actúa como un abogado especialista en propiedad intelectual en Argentina, que trabaja para el estudio jurídico Eguía, líder en registros de marcas. Escribe un email claro, profesional y persuasivo, destinado a un titular de una marca que recibió una oposición a su solicitud ante el INPI.
 
@@ -420,7 +511,8 @@ def send_emails(data):
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=700
+                    max_tokens=700,
+                    timeout=30
                 )
                 
                 email_content = response.choices[0].message.content
@@ -429,7 +521,7 @@ def send_emails(data):
             except Exception as openai_error:
                 log_api_error("OpenAI", "https://api.openai.com/v1/chat/completions", None, 
                             f"Email generation failed for {item.get('Titulares', 'N/A')}", str(openai_error))
-                emails_failed += 1
+                failed_count += 1
                 continue
             
             # Send email via Brevo
@@ -439,7 +531,7 @@ def send_emails(data):
                 "api-key": BREVO_API_KEY
             }
             
-            # Create HTML email with logo and footer
+            # Create simplified HTML email (optimized for memory)
             html_content = f"""
             <html>
             <head>
@@ -448,10 +540,7 @@ def send_emails(data):
                     body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
                     .logo {{ text-align: center; margin-bottom: 30px; }}
                     .content {{ margin: 20px 0; }}
-                    .whatsapp-cta {{ 
-                        text-align: center; 
-                        margin: 30px 0; 
-                    }}
+                    .whatsapp-cta {{ text-align: center; margin: 30px 0; }}
                     .whatsapp-btn {{ 
                         display: inline-block;
                         background-color: #25D366;
@@ -487,9 +576,9 @@ def send_emails(data):
                     {email_content.replace(chr(10), '<br>') if email_content else ''}
                     
                     <div class="whatsapp-cta">
-                        <a href="https://api.whatsapp.com/send?phone={WHATSAPP_PHONE}" 
+                        <a href="https://wa.me/{WHATSAPP_PHONE}?text=Hola%21%20Me%20contactaron%20por%20una%20oposici%C3%B3n%20a%20mi%20marca%2C%20quisiera%20saber%20m%C3%A1s%20informaci%C3%B3n.%20Mi%20nombre%20es%3A%0A"
                            class="whatsapp-btn" 
-                           target="_blank">
+                           target="_blank">     
                             📱 Contactar por WhatsApp
                         </a>
                     </div>
@@ -532,11 +621,11 @@ def send_emails(data):
             if campana_tag:
                 payload["tags"] = [campana_tag]
             
-            email_response = requests.post(BREVO_URL, headers=headers, data=json.dumps(payload))
+            email_response = requests.post(BREVO_URL, headers=headers, data=json.dumps(payload), timeout=30)
             
             if email_response.status_code == 201:
                 add_log(f"✅ Email sent successfully to {item.get('email_found')}", "success")
-                emails_sent += 1
+                success_count += 1
             else:
                 # Check for IP authorization errors specifically
                 if email_response.status_code in [401, 403]:
@@ -550,25 +639,17 @@ def send_emails(data):
                                 f"Failed to send email to {item.get('email_found')}", 
                                 email_response.text)
                 
-                emails_failed += 1
+                failed_count += 1
                 
         except Exception as e:
             add_log(f"❌ Error sending email for {item.get('Titulares', 'N/A')}: {str(e)}", "error", include_traceback=True)
-            emails_failed += 1
+            failed_count += 1
         
-        # Add delay between emails
-        if i < len(items_with_emails):
-            time.sleep(random.uniform(1.0, 2.0))
+        # Add delay between emails (reduced from original)
+        if i < len(batch_items):
+            time.sleep(random.uniform(0.5, 1.0))
     
-    # Final progress update
-    progress_bar.progress(1.0)
-    status_text.text("Email sending completed!")
-    
-    # Print summary
-    add_log(f"=== EMAIL SENDING SUMMARY ===", "success")
-    add_log(f"Total emails attempted: {len(items_with_emails)}", "success")
-    add_log(f"Emails sent successfully: {emails_sent}", "success")
-    add_log(f"Emails failed: {emails_failed}", "success" if emails_failed == 0 else "error")
+    return success_count, failed_count
 
 def generate_comprehensive_json(data):
     """Generate comprehensive JSON with all XLS data + emails"""

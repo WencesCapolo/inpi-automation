@@ -471,7 +471,7 @@ def process_email_batch(batch_items, start_idx, total_emails, progress_bar, stat
             
             try:
                 response = openai.chat.completions.create(
-                    model="gpt-4o",
+                    model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": "Eres un abogado experto en propiedad intelectual."},
                         {"role": "user", "content": prompt}

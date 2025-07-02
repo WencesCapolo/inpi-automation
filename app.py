@@ -575,6 +575,10 @@ def process_email_batch(batch_items, start_idx, total_emails, progress_bar, stat
                     "name": "Estudio Eguía",
                     "email": "nicolas@eguia.com.ar"
                 },
+                "replyTo": {
+                    "name": "Estudio Eguía",
+                    "email": "fgarzon@eguia.com.ar"
+                },
                 "to": [
                     {
                         "email": item.get('email_found'),
